@@ -5,33 +5,64 @@ import { usePlaidLink } from "react-plaid-link";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@supabase/supabase-js";
 
-type PlaidTransaction = {
-  transaction_id: string;
+type PropTransaction = {
+  transaction_id?: string;
   name: string;
   amount: number;
   date: string;
   category?: string[];
-};
-
-type PropTransaction = PlaidTransaction & {
   prop_firm: string;
   type: "expense" | "payout";
 };
 
-const PROP_FIRMS = [
-  "apex",
-  "topstep",
-  "tradeify",
-  "lucid",
-  "myfundedfutures",
-  "bulenox",
-  "take profit trader",
-];
+type DateFilter =
+  | "all"
+  | "ytd"
+  | "last30"
+  | "last90"
+  | "thisYear"
+  | "lastYear"
+  | "custom";
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
+function formatPercent(value: number) {
+  return `${value.toFixed(2)}%`;
+}
+
+function getUsername(session: Session | null) {
+  if (!session?.user) return "";
+
+  const metadata = session.user.user_metadata || {};
+  const username =
+    metadata.username ||
+    metadata.full_name ||
+    metadata.name ||
+    metadata.display_name;
+
+  if (typeof username === "string" && username.trim()) {
+    return username.trim();
+  }
+
+  const email = session.user.email || "";
+  if (email.includes("@")) {
+    return email.split("@")[0];
+  }
+
+  return "Trader";
+}
 
 export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [usernameInput, setUsernameInput] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "signup">("signup");
   const [authMessage, setAuthMessage] = useState("");
 
@@ -43,6 +74,10 @@ export default function Home() {
 
   const [selectedFirm, setSelectedFirm] = useState("all");
   const [selectedType, setSelectedType] = useState("all");
+  const [selectedDateFilter, setSelectedDateFilter] =
+    useState<DateFilter>("all");
+  const [customStartDate, setCustomStartDate] = useState("");
+  const [customEndDate, setCustomEndDate] = useState("");
 
   useEffect(() => {
     const loadSession = async () => {
@@ -97,10 +132,7 @@ export default function Home() {
           );
 
           setTransactions(loadedTransactions);
-
-          if (loadedTransactions.length > 0) {
-            setHasLinkedBank(true);
-          }
+          setHasLinkedBank(true);
         }
       } catch (error) {
         console.error("Failed to load saved transactions:", error);
@@ -130,28 +162,6 @@ export default function Home() {
     fetchLinkToken();
   }, [session]);
 
-  const detectPropTransactions = (
-    allTransactions: PlaidTransaction[]
-  ): PropTransaction[] => {
-    return allTransactions
-      .map((transaction) => {
-        const lowerName = transaction.name.toLowerCase();
-
-        const matchedFirm = PROP_FIRMS.find((firm) =>
-          lowerName.includes(firm)
-        );
-
-        if (!matchedFirm) return null;
-
-        return {
-          ...transaction,
-          prop_firm: matchedFirm,
-          type: transaction.amount > 0 ? "expense" : "payout",
-        };
-      })
-      .filter((tx): tx is PropTransaction => tx !== null);
-  };
-
   const handleSignUp = async () => {
     setAuthMessage("");
 
@@ -160,9 +170,15 @@ export default function Home() {
       return;
     }
 
+    const metadata =
+      usernameInput.trim().length > 0
+        ? { username: usernameInput.trim() }
+        : undefined;
+
     const { error } = await supabase.auth.signUp({
       email,
       password,
+      options: metadata ? { data: metadata } : undefined,
     });
 
     if (error) {
@@ -201,66 +217,14 @@ export default function Home() {
     setLinkToken(null);
     setSelectedFirm("all");
     setSelectedType("all");
+    setSelectedDateFilter("all");
+    setCustomStartDate("");
+    setCustomEndDate("");
     setHasLinkedBank(false);
     setIsRetrying(false);
   };
 
-  const fetchAndSaveTransactions = async (userId: string) => {
-    setStatus("Fetching transactions...");
-
-    const transactionsResponse = await fetch("/api/transactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        user_id: userId,
-      }),
-    });
-
-    const transactionsData = await transactionsResponse.json();
-
-    if (transactionsData.product_not_ready) {
-      setStatus("Your bank is still syncing transactions. Try again in a few minutes.");
-      return;
-    }
-
-    if (!transactionsData.success && !transactionsData.transactions) {
-      setStatus("Failed to fetch transactions.");
-      return;
-    }
-
-    const combinedTransactions = [...(transactionsData.transactions || [])];
-    const propTransactions = detectPropTransactions(combinedTransactions);
-
-    setTransactions(propTransactions);
-    setStatus("Saving transactions...");
-
-    const saveResponse = await fetch("/api/save-transactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        user_id: userId,
-        transactions: propTransactions,
-      }),
-    });
-
-    const saveData = await saveResponse.json();
-
-    if (saveData.success) {
-      if (saveData.inserted === 0) {
-        setStatus("No new transactions to save. Existing data loaded.");
-      } else {
-        setStatus(
-          `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
-        );
-      }
-    } else {
-      setStatus("Failed to save transactions.");
-    }
-
+  const reloadSavedTransactions = async (userId: string) => {
     const reloadResponse = await fetch("/api/load-transactions", {
       method: "POST",
       headers: {
@@ -290,6 +254,62 @@ export default function Home() {
 
       setTransactions(loadedTransactions);
     }
+  };
+
+  const fetchAndSaveTransactions = async (userId: string) => {
+    setStatus("Fetching transactions...");
+
+    const transactionsResponse = await fetch("/api/transactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+      }),
+    });
+
+    const transactionsData = await transactionsResponse.json();
+
+    if (transactionsData.product_not_ready) {
+      setStatus("Your bank is still syncing transactions. Try again in a few minutes.");
+      return;
+    }
+
+    if (!transactionsData.success || !transactionsData.transactions) {
+      setStatus("Failed to fetch transactions.");
+      return;
+    }
+
+    setStatus("Saving transactions...");
+
+    const saveResponse = await fetch("/api/save-transactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        transactions: transactionsData.transactions,
+      }),
+    });
+
+    const saveData = await saveResponse.json();
+
+    if (saveData.success) {
+      if (saveData.inserted === 0) {
+        setStatus("No new transactions to save. Existing data loaded.");
+      } else {
+        setStatus(
+          `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
+        );
+      }
+    } else {
+      setStatus("Failed to save transactions.");
+      return;
+    }
+
+    await reloadSavedTransactions(userId);
   };
 
   const onSuccess = async (public_token: string) => {
@@ -349,8 +369,60 @@ export default function Home() {
     onSuccess,
   });
 
-  const filteredTransactions = useMemo(() => {
+  const dateFilteredTransactions = useMemo(() => {
+    if (selectedDateFilter === "all") return transactions;
+
+    const now = new Date();
+    const currentYear = now.getFullYear();
+
     return transactions.filter((tx) => {
+      const txDate = new Date(`${tx.date}T00:00:00`);
+      if (Number.isNaN(txDate.getTime())) return false;
+
+      if (selectedDateFilter === "ytd") {
+        const startOfYear = new Date(currentYear, 0, 1);
+        return txDate >= startOfYear && txDate <= now;
+      }
+
+      if (selectedDateFilter === "last30") {
+        const cutoff = new Date();
+        cutoff.setDate(now.getDate() - 30);
+        return txDate >= cutoff && txDate <= now;
+      }
+
+      if (selectedDateFilter === "last90") {
+        const cutoff = new Date();
+        cutoff.setDate(now.getDate() - 90);
+        return txDate >= cutoff && txDate <= now;
+      }
+
+      if (selectedDateFilter === "thisYear") {
+        return txDate.getFullYear() === currentYear;
+      }
+
+      if (selectedDateFilter === "lastYear") {
+        return txDate.getFullYear() === currentYear - 1;
+      }
+
+      if (selectedDateFilter === "custom") {
+        if (!customStartDate && !customEndDate) return true;
+
+        const start = customStartDate
+          ? new Date(`${customStartDate}T00:00:00`)
+          : null;
+        const end = customEndDate ? new Date(`${customEndDate}T23:59:59`) : null;
+
+        if (start && txDate < start) return false;
+        if (end && txDate > end) return false;
+        return true;
+      }
+
+      return true;
+    });
+  }, [transactions, selectedDateFilter, customStartDate, customEndDate]);
+
+  const filteredTransactions = useMemo(() => {
+    return dateFilteredTransactions.filter((tx) => {
       const matchesFirm =
         selectedFirm === "all" || tx.prop_firm === selectedFirm;
       const matchesType =
@@ -358,19 +430,19 @@ export default function Home() {
 
       return matchesFirm && matchesType;
     });
-  }, [transactions, selectedFirm, selectedType]);
+  }, [dateFilteredTransactions, selectedFirm, selectedType]);
 
   const totalExpenses = useMemo(() => {
-    return transactions
+    return dateFilteredTransactions
       .filter((t) => t.type === "expense")
       .reduce((sum, t) => sum + t.amount, 0);
-  }, [transactions]);
+  }, [dateFilteredTransactions]);
 
   const totalPayouts = useMemo(() => {
-    return transactions
+    return dateFilteredTransactions
       .filter((t) => t.type === "payout")
       .reduce((sum, t) => sum + Math.abs(t.amount), 0);
-  }, [transactions]);
+  }, [dateFilteredTransactions]);
 
   const netProfit = totalPayouts - totalExpenses;
   const roi = totalExpenses > 0 ? (netProfit / totalExpenses) * 100 : 0;
@@ -381,7 +453,7 @@ export default function Home() {
       { spend: number; payouts: number; net: number; count: number }
     > = {};
 
-    for (const tx of transactions) {
+    for (const tx of dateFilteredTransactions) {
       if (!grouped[tx.prop_firm]) {
         grouped[tx.prop_firm] = {
           spend: 0,
@@ -409,14 +481,16 @@ export default function Home() {
         ...values,
       }))
       .sort((a, b) => b.net - a.net);
-  }, [transactions]);
+  }, [dateFilteredTransactions]);
 
   const availableFirms = useMemo(() => {
-    return [...new Set(transactions.map((tx) => tx.prop_firm))].sort();
-  }, [transactions]);
+    return [...new Set(dateFilteredTransactions.map((tx) => tx.prop_firm))].sort();
+  }, [dateFilteredTransactions]);
 
   const profitCurveData = useMemo(() => {
-    const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+    const sorted = [...dateFilteredTransactions].sort((a, b) =>
+      a.date.localeCompare(b.date)
+    );
     let runningTotal = 0;
 
     return sorted.map((tx, index) => {
@@ -428,13 +502,13 @@ export default function Home() {
         value: runningTotal,
       };
     });
-  }, [transactions]);
+  }, [dateFilteredTransactions]);
 
   const chartPoints = useMemo(() => {
     if (profitCurveData.length === 0) return "";
 
     const width = 760;
-    const height = 260;
+    const height = 280;
     const padding = 24;
 
     const values = profitCurveData.map((d) => d.value);
@@ -463,67 +537,69 @@ export default function Home() {
       ? profitCurveData[profitCurveData.length - 1].value
       : 0;
 
+  const username = getUsername(session);
+
   const pageStyle: CSSProperties = {
     minHeight: "100vh",
     background:
-      "linear-gradient(180deg, #030712 0%, #0b1735 38%, #f3f4f6 38%, #f3f4f6 100%)",
+      "radial-gradient(circle at top, rgba(37,99,235,0.14) 0%, rgba(2,6,23,0) 28%), linear-gradient(180deg, #030712 0%, #071122 28%, #0f172a 48%, #f3f6fb 48%, #eef2f7 100%)",
     fontFamily:
       'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    color: "#111827",
+    color: "#0f172a",
   };
 
   const shellStyle: CSSProperties = {
-    maxWidth: "1400px",
+    maxWidth: "1440px",
     margin: "0 auto",
-    padding: "22px 24px 72px",
+    padding: "24px 24px 72px",
   };
 
   const heroCard: CSSProperties = {
     background:
-      "linear-gradient(135deg, rgba(17,24,39,0.92), rgba(23,37,84,0.88))",
+      "linear-gradient(135deg, rgba(15,23,42,0.98), rgba(29,78,216,0.72))",
     border: "1px solid rgba(255,255,255,0.10)",
-    borderRadius: "28px",
-    padding: "30px 34px",
+    borderRadius: "30px",
+    padding: "32px 34px",
     color: "white",
     boxShadow: "0 24px 70px rgba(0,0,0,0.28)",
-    backdropFilter: "blur(8px)",
+    backdropFilter: "blur(10px)",
   };
 
   const panelStyle: CSSProperties = {
-    background: "#f8fafc",
-    border: "1px solid #dbe1ea",
-    borderRadius: "28px",
-    padding: "28px",
-    boxShadow: "0 10px 30px rgba(15,23,42,0.04)",
+    background: "rgba(255,255,255,0.92)",
+    border: "1px solid #dbe4f0",
+    borderRadius: "26px",
+    padding: "26px",
+    boxShadow: "0 12px 28px rgba(15,23,42,0.05)",
   };
 
-  const metricCard = (borderColor: string): CSSProperties => ({
-    background: "#ffffff",
-    border: `1px solid ${borderColor}`,
+  const metricCard = (accent: string): CSSProperties => ({
+    background: "rgba(255,255,255,0.96)",
+    border: `1px solid ${accent}`,
     borderRadius: "24px",
     padding: "24px",
-    boxShadow: "0 10px 24px rgba(15,23,42,0.05)",
+    boxShadow: "0 10px 26px rgba(15,23,42,0.05)",
   });
 
   const buttonPrimary: CSSProperties = {
-    padding: "16px 24px",
+    padding: "14px 20px",
     borderRadius: "16px",
     border: "none",
     background: "white",
-    color: "#111827",
-    fontWeight: 700,
-    fontSize: "18px",
+    color: "#0f172a",
+    fontWeight: 800,
+    fontSize: "15px",
     cursor: "pointer",
   };
 
   const buttonSecondary: CSSProperties = {
-    padding: "16px 24px",
+    padding: "14px 20px",
     borderRadius: "16px",
-    border: "1px solid rgba(255,255,255,0.18)",
+    border: "1px solid rgba(255,255,255,0.16)",
     background: "rgba(255,255,255,0.08)",
     color: "white",
-    fontWeight: 700,
-    fontSize: "18px",
+    fontWeight: 800,
+    fontSize: "15px",
     cursor: "pointer",
   };
 
@@ -548,18 +624,31 @@ export default function Home() {
     color: "#111827",
   };
 
+  const labelChip: CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "8px 12px",
+    borderRadius: "999px",
+    background: "rgba(255,255,255,0.08)",
+    color: "rgba(255,255,255,0.90)",
+    fontSize: "13px",
+    fontWeight: 700,
+    border: "1px solid rgba(255,255,255,0.10)",
+  };
+
   if (!session) {
     return (
       <main style={pageStyle}>
         <div style={shellStyle}>
-          <div style={{ ...heroCard, maxWidth: "620px", margin: "48px auto" }}>
+          <div style={{ ...heroCard, maxWidth: "680px", margin: "56px auto" }}>
             <div
               style={{
-                fontSize: "13px",
+                fontSize: "12px",
                 textTransform: "uppercase",
-                letterSpacing: "0.16em",
+                letterSpacing: "0.18em",
                 color: "#93c5fd",
-                marginBottom: "14px",
+                marginBottom: "16px",
                 fontWeight: 800,
               }}
             >
@@ -568,33 +657,34 @@ export default function Home() {
 
             <h1
               style={{
-                fontSize: "48px",
+                fontSize: "52px",
                 lineHeight: 1.02,
                 margin: "0 0 12px",
+                letterSpacing: "-0.03em",
               }}
             >
-              Track your real prop firm profitability.
+              Turn prop firm activity into verified trading truth.
             </h1>
 
             <p
               style={{
                 color: "rgba(255,255,255,0.82)",
                 fontSize: "17px",
-                lineHeight: 1.65,
+                lineHeight: 1.7,
                 marginBottom: "24px",
+                maxWidth: "580px",
               }}
             >
-              Connect your accounts, detect prop firm fees and payouts, and see
-              whether you’re actually profitable.
+              Connect your bank, classify prop firm fees and payouts, and see
+              the real numbers behind your trading business.
             </p>
 
-            <div style={{ marginBottom: "18px" }}>
+            <div style={{ display: "flex", gap: "10px", marginBottom: "18px" }}>
               <button
                 type="button"
                 onClick={() => setAuthMode("signup")}
                 style={{
                   ...buttonPrimary,
-                  marginRight: "12px",
                   background: authMode === "signup" ? "white" : "#1f2937",
                   color: authMode === "signup" ? "#111827" : "white",
                 }}
@@ -618,10 +708,21 @@ export default function Home() {
             <div
               style={{
                 background: "white",
-                borderRadius: "20px",
-                padding: "20px",
+                borderRadius: "24px",
+                padding: "22px",
+                boxShadow: "0 18px 40px rgba(15,23,42,0.16)",
               }}
             >
+              {authMode === "signup" && (
+                <input
+                  type="text"
+                  placeholder="Username"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value)}
+                  style={inputStyle}
+                />
+              )}
+
               <input
                 type="email"
                 placeholder="Email"
@@ -679,14 +780,14 @@ export default function Home() {
               flexWrap: "wrap",
             }}
           >
-            <div>
+            <div style={{ maxWidth: "780px" }}>
               <div
                 style={{
-                  fontSize: "13px",
+                  fontSize: "12px",
                   textTransform: "uppercase",
-                  letterSpacing: "0.16em",
+                  letterSpacing: "0.18em",
                   color: "#93c5fd",
-                  marginBottom: "14px",
+                  marginBottom: "16px",
                   fontWeight: 800,
                 }}
               >
@@ -696,25 +797,40 @@ export default function Home() {
               <h1
                 style={{
                   fontSize: "56px",
-                  lineHeight: 1,
-                  margin: "0 0 18px",
+                  lineHeight: 0.98,
+                  margin: "0 0 14px",
+                  letterSpacing: "-0.04em",
                 }}
               >
-                Dashboard
+                Verified performance dashboard
               </h1>
 
               <p
                 style={{
                   color: "rgba(255,255,255,0.82)",
-                  fontSize: "18px",
-                  margin: 0,
+                  fontSize: "17px",
+                  lineHeight: 1.7,
+                  margin: "0 0 18px",
                 }}
               >
-                Logged in as <strong>{session.user.email}</strong>
+                Built to surface the real economics of prop trading: fees,
+                payouts, profitability, and firm-level transparency.
               </p>
+
+              <div
+                style={{
+                  display: "flex",
+                  gap: "10px",
+                  flexWrap: "wrap",
+                }}
+              >
+                <div style={labelChip}>User: {username}</div>
+                <div style={labelChip}>Range: {selectedDateFilter === "custom" ? "Custom" : selectedDateFilter}</div>
+                <div style={labelChip}>{dateFilteredTransactions.length} classified transactions</div>
+              </div>
             </div>
 
-            <div style={{ display: "flex", gap: "14px", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
               <button
                 type="button"
                 onClick={() => open()}
@@ -725,7 +841,7 @@ export default function Home() {
                   cursor: !ready || !linkToken ? "not-allowed" : "pointer",
                 }}
               >
-                Connect Bank Account
+                Connect Bank
               </button>
 
               {hasLinkedBank && (
@@ -741,7 +857,7 @@ export default function Home() {
                     cursor: isRetrying ? "not-allowed" : "pointer",
                   }}
                 >
-                  {isRetrying ? "Retrying..." : "Retry Transactions"}
+                  {isRetrying ? "Retrying..." : "Retry Sync"}
                 </button>
               )}
 
@@ -758,12 +874,13 @@ export default function Home() {
           <div
             style={{
               marginTop: "24px",
-              padding: "18px 20px",
+              padding: "16px 18px",
               borderRadius: "18px",
               background: "rgba(255,255,255,0.08)",
               color: "white",
               fontWeight: 700,
-              fontSize: "18px",
+              fontSize: "15px",
+              border: "1px solid rgba(255,255,255,0.10)",
             }}
           >
             Status: {status}
@@ -772,92 +889,193 @@ export default function Home() {
 
         <section
           style={{
-            marginTop: "34px",
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-            gap: "18px",
+            marginTop: "30px",
+            ...panelStyle,
+            padding: "22px 24px",
           }}
         >
-          <div style={metricCard("#dbeafe")}>
-            <div
-              style={{
-                color: "#6b7280",
-                fontSize: "17px",
-                marginBottom: "14px",
-              }}
-            >
-              Total Spend
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: "12px",
+              alignItems: "end",
+            }}
+          >
+            <div>
+              <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                Date Range
+              </div>
+              <select
+                value={selectedDateFilter}
+                onChange={(e) =>
+                  setSelectedDateFilter(e.target.value as DateFilter)
+                }
+                style={selectStyle}
+              >
+                <option value="all">All time</option>
+                <option value="ytd">YTD</option>
+                <option value="last30">Last 30 days</option>
+                <option value="last90">Last 90 days</option>
+                <option value="thisYear">This year</option>
+                <option value="lastYear">Last year</option>
+                <option value="custom">Custom</option>
+              </select>
             </div>
-            <div style={{ fontSize: "56px", fontWeight: 800, lineHeight: 1 }}>
-              ${totalExpenses.toFixed(2)}
-            </div>
-          </div>
 
-          <div style={metricCard("#dcfce7")}>
-            <div
-              style={{
-                color: "#6b7280",
-                fontSize: "17px",
-                marginBottom: "14px",
-              }}
-            >
-              Total Payouts
-            </div>
-            <div style={{ fontSize: "56px", fontWeight: 800, lineHeight: 1 }}>
-              ${totalPayouts.toFixed(2)}
-            </div>
-          </div>
+            {selectedDateFilter === "custom" && (
+              <>
+                <div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                    Start Date
+                  </div>
+                  <input
+                    type="date"
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value)}
+                    style={selectStyle}
+                  />
+                </div>
 
-          <div style={metricCard(netProfit >= 0 ? "#dcfce7" : "#fee2e2")}>
-            <div
-              style={{
-                color: "#6b7280",
-                fontSize: "17px",
-                marginBottom: "14px",
-              }}
-            >
-              Net Profit
-            </div>
-            <div
-              style={{
-                fontSize: "56px",
-                fontWeight: 800,
-                lineHeight: 1,
-                color: netProfit >= 0 ? "#166534" : "#991b1b",
-              }}
-            >
-              ${netProfit.toFixed(2)}
-            </div>
-          </div>
+                <div>
+                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                    End Date
+                  </div>
+                  <input
+                    type="date"
+                    value={customEndDate}
+                    onChange={(e) => setCustomEndDate(e.target.value)}
+                    style={selectStyle}
+                  />
+                </div>
+              </>
+            )}
 
-          <div style={metricCard("#ede9fe")}>
+            <div>
+              <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                Firm Filter
+              </div>
+              <select
+                value={selectedFirm}
+                onChange={(e) => setSelectedFirm(e.target.value)}
+                style={selectStyle}
+              >
+                <option value="all">All firms</option>
+                {availableFirms.map((firm) => (
+                  <option key={firm} value={firm}>
+                    {firm.charAt(0).toUpperCase() + firm.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                Transaction Type
+              </div>
+              <select
+                value={selectedType}
+                onChange={(e) => setSelectedType(e.target.value)}
+                style={selectStyle}
+              >
+                <option value="all">All types</option>
+                <option value="expense">Expense</option>
+                <option value="payout">Payout</option>
+              </select>
+            </div>
+
             <div
               style={{
-                color: "#6b7280",
-                fontSize: "17px",
-                marginBottom: "14px",
+                fontSize: "14px",
+                color: "#64748b",
+                fontWeight: 700,
+                paddingBottom: "2px",
               }}
             >
-              ROI
-            </div>
-            <div style={{ fontSize: "56px", fontWeight: 800, lineHeight: 1 }}>
-              {roi.toFixed(2)}%
+              {dateFilteredTransactions.length} transactions in selected range
             </div>
           </div>
         </section>
 
         <section
           style={{
-            marginTop: "34px",
+            marginTop: "30px",
             display: "grid",
-            gridTemplateColumns: "1.2fr 1fr",
+            gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+            gap: "18px",
+          }}
+        >
+          <div style={metricCard("#dbeafe")}>
+            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+              Total Spend
+            </div>
+            <div style={{ fontSize: "44px", fontWeight: 900, lineHeight: 1, letterSpacing: "-0.03em" }}>
+              {formatCurrency(totalExpenses)}
+            </div>
+          </div>
+
+          <div style={metricCard("#dcfce7")}>
+            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+              Total Payouts
+            </div>
+            <div style={{ fontSize: "44px", fontWeight: 900, lineHeight: 1, letterSpacing: "-0.03em" }}>
+              {formatCurrency(totalPayouts)}
+            </div>
+          </div>
+
+          <div style={metricCard(netProfit >= 0 ? "#dcfce7" : "#fee2e2")}>
+            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+              Net Profit
+            </div>
+            <div
+              style={{
+                fontSize: "44px",
+                fontWeight: 900,
+                lineHeight: 1,
+                letterSpacing: "-0.03em",
+                color: netProfit >= 0 ? "#166534" : "#991b1b",
+              }}
+            >
+              {formatCurrency(netProfit)}
+            </div>
+          </div>
+
+          <div style={metricCard("#ede9fe")}>
+            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+              ROI
+            </div>
+            <div style={{ fontSize: "44px", fontWeight: 900, lineHeight: 1, letterSpacing: "-0.03em" }}>
+              {formatPercent(roi)}
+            </div>
+          </div>
+        </section>
+
+        <section
+          style={{
+            marginTop: "30px",
+            display: "grid",
+            gridTemplateColumns: "1.2fr 0.9fr",
             gap: "22px",
           }}
         >
           <div style={panelStyle}>
-            <h2 style={{ marginTop: 0, marginBottom: "20px", fontSize: "22px" }}>
-              Prop Firm Breakdown
-            </h2>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: "16px",
+                alignItems: "flex-start",
+                flexWrap: "wrap",
+                marginBottom: "18px",
+              }}
+            >
+              <div>
+                <h2 style={{ margin: 0, fontSize: "22px" }}>Prop Firm Breakdown</h2>
+                <p style={{ margin: "8px 0 0", color: "#64748b" }}>
+                  Categorized spend and payout totals by firm.
+                </p>
+              </div>
+            </div>
 
             {perFirmBreakdown.length === 0 ? (
               <p style={{ color: "#6b7280" }}>No prop firm activity yet.</p>
@@ -865,60 +1083,53 @@ export default function Home() {
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                  gap: "16px",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+                  gap: "14px",
                 }}
               >
                 {perFirmBreakdown.map((firm) => (
                   <div
                     key={firm.firm}
                     style={{
-                      border: "1px solid #d7dbe3",
+                      border: "1px solid #e2e8f0",
                       borderRadius: "22px",
                       padding: "20px",
-                      background: "#fbfbfc",
+                      background: "linear-gradient(180deg, #ffffff 0%, #f8fbff 100%)",
                     }}
                   >
                     <div
                       style={{
-                        fontWeight: 800,
-                        fontSize: "20px",
+                        fontWeight: 900,
+                        fontSize: "18px",
                         textTransform: "capitalize",
                         marginBottom: "12px",
-                        color: "#111827",
+                        color: "#0f172a",
                       }}
                     >
                       {firm.firm}
                     </div>
 
-                    <div
-                      style={{
-                        color: "#4b5563",
-                        marginBottom: "10px",
-                        fontSize: "16px",
-                      }}
-                    >
-                      Spend: ${firm.spend.toFixed(2)}
+                    <div style={{ color: "#475569", marginBottom: "8px", fontSize: "15px" }}>
+                      Spend: {formatCurrency(firm.spend)}
                     </div>
 
-                    <div
-                      style={{
-                        color: "#4b5563",
-                        marginBottom: "10px",
-                        fontSize: "16px",
-                      }}
-                    >
-                      Payouts: ${firm.payouts.toFixed(2)}
+                    <div style={{ color: "#475569", marginBottom: "8px", fontSize: "15px" }}>
+                      Payouts: {formatCurrency(firm.payouts)}
                     </div>
 
                     <div
                       style={{
                         fontWeight: 800,
-                        fontSize: "16px",
+                        fontSize: "15px",
                         color: firm.net >= 0 ? "#166534" : "#b42318",
+                        marginBottom: "8px",
                       }}
                     >
-                      Net: ${firm.net.toFixed(2)}
+                      Net: {formatCurrency(firm.net)}
+                    </div>
+
+                    <div style={{ color: "#64748b", fontSize: "13px", fontWeight: 700 }}>
+                      {firm.count} classified transactions
                     </div>
                   </div>
                 ))}
@@ -927,83 +1138,73 @@ export default function Home() {
           </div>
 
           <div style={panelStyle}>
-            <h2 style={{ marginTop: 0, marginBottom: "20px", fontSize: "22px" }}>
-              Overview
+            <h2 style={{ marginTop: 0, marginBottom: "18px", fontSize: "22px" }}>
+              Transparency Snapshot
             </h2>
 
             <div
               style={{
                 borderRadius: "22px",
-                background: "#07132f",
+                background: "linear-gradient(180deg, #0f172a 0%, #1d4ed8 100%)",
                 color: "white",
                 padding: "24px",
+                marginBottom: "16px",
               }}
             >
-              <div
-                style={{
-                  fontSize: "15px",
-                  color: "#9ca3af",
-                  marginBottom: "12px",
-                }}
-              >
-                Best performing metric
+              <div style={{ fontSize: "13px", color: "#bfdbfe", marginBottom: "10px", fontWeight: 700 }}>
+                Performance status
               </div>
 
               <div
                 style={{
                   fontSize: "28px",
-                  fontWeight: 800,
-                  marginBottom: "14px",
+                  fontWeight: 900,
+                  marginBottom: "12px",
+                  letterSpacing: "-0.03em",
                 }}
               >
-                {netProfit >= 0 ? "Profitable" : "Negative"}
+                {netProfit >= 0 ? "Verified profitable" : "Net negative"}
               </div>
 
               <div
                 style={{
-                  color: "#d1d5db",
+                  color: "#dbeafe",
                   lineHeight: 1.7,
-                  fontSize: "16px",
+                  fontSize: "15px",
                 }}
               >
-                Your dashboard is tracking spend, payouts, and ROI from saved
-                transactions in Supabase.
+                This dashboard reflects categorized prop firm fees and payouts
+                from connected banking activity.
               </div>
             </div>
 
             <div
               style={{
-                marginTop: "18px",
-                border: "1px solid #d7dbe3",
+                border: "1px solid #e2e8f0",
                 borderRadius: "20px",
                 padding: "20px",
-                background: "#fbfbfc",
+                background: "#ffffff",
               }}
             >
-              <div
-                style={{
-                  fontWeight: 800,
-                  marginBottom: "10px",
-                  fontSize: "18px",
-                }}
-              >
+              <div style={{ fontWeight: 800, marginBottom: "8px", fontSize: "16px" }}>
                 Latest curve value
               </div>
 
               <div
                 style={{
-                  fontSize: "34px",
-                  fontWeight: 800,
+                  fontSize: "32px",
+                  fontWeight: 900,
                   color: latestCurveValue >= 0 ? "#166534" : "#991b1b",
+                  letterSpacing: "-0.03em",
                 }}
               >
-                ${latestCurveValue.toFixed(2)}
+                {formatCurrency(latestCurveValue)}
               </div>
             </div>
           </div>
         </section>
 
-        <section style={{ marginTop: "34px", ...panelStyle }}>
+        <section style={{ marginTop: "30px", ...panelStyle }}>
           <div
             style={{
               display: "flex",
@@ -1016,8 +1217,8 @@ export default function Home() {
           >
             <div>
               <h2 style={{ margin: 0, fontSize: "22px" }}>Profit Curve</h2>
-              <p style={{ margin: "8px 0 0", color: "#6b7280" }}>
-                Cumulative net profit over time
+              <p style={{ margin: "8px 0 0", color: "#64748b" }}>
+                Cumulative net profit over the selected date range.
               </p>
             </div>
           </div>
@@ -1025,9 +1226,9 @@ export default function Home() {
           {profitCurveData.length === 0 ? (
             <div
               style={{
-                border: "1px solid #d7dbe3",
+                border: "1px solid #e2e8f0",
                 borderRadius: "20px",
-                background: "#fbfbfc",
+                background: "#ffffff",
                 padding: "28px",
                 color: "#6b7280",
               }}
@@ -1037,15 +1238,15 @@ export default function Home() {
           ) : (
             <div
               style={{
-                border: "1px solid #d7dbe3",
+                border: "1px solid #e2e8f0",
                 borderRadius: "22px",
-                background: "#fbfbfc",
+                background: "linear-gradient(180deg, #ffffff 0%, #f8fbff 100%)",
                 padding: "18px",
               }}
             >
               <svg
-                viewBox="0 0 760 260"
-                style={{ width: "100%", height: "260px", display: "block" }}
+                viewBox="0 0 760 280"
+                style={{ width: "100%", height: "280px", display: "block" }}
               >
                 <polyline
                   fill="none"
@@ -1062,8 +1263,9 @@ export default function Home() {
                   marginTop: "10px",
                   display: "flex",
                   justifyContent: "space-between",
-                  color: "#6b7280",
+                  color: "#64748b",
                   fontSize: "14px",
+                  fontWeight: 700,
                 }}
               >
                 <span>{profitCurveData[0]?.date}</span>
@@ -1073,7 +1275,7 @@ export default function Home() {
           )}
         </section>
 
-        <section style={{ marginTop: "34px", ...panelStyle }}>
+        <section style={{ marginTop: "30px", ...panelStyle }}>
           <div
             style={{
               display: "flex",
@@ -1086,45 +1288,20 @@ export default function Home() {
           >
             <div>
               <h2 style={{ margin: 0, fontSize: "22px" }}>
-                Prop Firm Transactions
+                Classified Transactions
               </h2>
-              <p style={{ margin: "8px 0 0", color: "#6b7280" }}>
-                {filteredTransactions.length} shown
+              <p style={{ margin: "8px 0 0", color: "#64748b" }}>
+                {filteredTransactions.length} shown after filters
               </p>
-            </div>
-
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-              <select
-                value={selectedFirm}
-                onChange={(e) => setSelectedFirm(e.target.value)}
-                style={selectStyle}
-              >
-                <option value="all">All firms</option>
-                {availableFirms.map((firm) => (
-                  <option key={firm} value={firm}>
-                    {firm.charAt(0).toUpperCase() + firm.slice(1)}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={selectedType}
-                onChange={(e) => setSelectedType(e.target.value)}
-                style={selectStyle}
-              >
-                <option value="all">All types</option>
-                <option value="expense">Expense</option>
-                <option value="payout">Payout</option>
-              </select>
             </div>
           </div>
 
           {filteredTransactions.length === 0 ? (
             <div
               style={{
-                border: "1px solid #d7dbe3",
+                border: "1px solid #e2e8f0",
                 borderRadius: "20px",
-                background: "#fbfbfc",
+                background: "#ffffff",
                 padding: "28px",
                 color: "#6b7280",
               }}
@@ -1132,44 +1309,56 @@ export default function Home() {
               No transactions match the current filters.
             </div>
           ) : (
-            <div style={{ display: "grid", gap: "14px" }}>
+            <div style={{ display: "grid", gap: "12px" }}>
               {filteredTransactions.map((tx, index) => (
                 <div
-                  key={`${tx.transaction_id}-${tx.date}-${tx.amount}-${index}`}
+                  key={`${tx.transaction_id || "tx"}-${tx.date}-${tx.amount}-${index}`}
                   style={{
                     display: "grid",
-                    gridTemplateColumns: "180px 1fr 180px 180px",
+                    gridTemplateColumns: "160px 1fr 180px 180px",
                     gap: "16px",
                     alignItems: "center",
-                    border: "1px solid #d7dbe3",
-                    borderRadius: "22px",
-                    padding: "22px 28px",
-                    background: "#fbfbfc",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "20px",
+                    padding: "18px 22px",
+                    background: "#ffffff",
                   }}
                 >
                   <div
                     style={{
-                      color: "#6b7280",
-                      fontSize: "18px",
+                      color: "#64748b",
+                      fontSize: "15px",
+                      fontWeight: 700,
                     }}
                   >
                     {tx.date}
                   </div>
 
-                  <div
-                    style={{
-                      fontWeight: 800,
-                      fontSize: "18px",
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {tx.prop_firm}
+                  <div>
+                    <div
+                      style={{
+                        fontWeight: 900,
+                        fontSize: "16px",
+                        textTransform: "capitalize",
+                        marginBottom: "4px",
+                      }}
+                    >
+                      {tx.prop_firm}
+                    </div>
+                    <div
+                      style={{
+                        color: "#64748b",
+                        fontSize: "13px",
+                      }}
+                    >
+                      {tx.name}
+                    </div>
                   </div>
 
                   <div
                     style={{
                       fontWeight: 800,
-                      fontSize: "18px",
+                      fontSize: "15px",
                       color: tx.type === "payout" ? "#166534" : "#a14b09",
                       textTransform: "lowercase",
                     }}
@@ -1179,12 +1368,12 @@ export default function Home() {
 
                   <div
                     style={{
-                      fontWeight: 800,
-                      fontSize: "18px",
+                      fontWeight: 900,
+                      fontSize: "16px",
                       textAlign: "right",
                     }}
                   >
-                    ${Math.abs(tx.amount).toFixed(2)}
+                    {formatCurrency(Math.abs(tx.amount))}
                   </div>
                 </div>
               ))}

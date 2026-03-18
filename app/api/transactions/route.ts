@@ -34,19 +34,55 @@ export async function POST(req: NextRequest) {
     }
 
     const startDate = new Date();
-    startDate.setDate(startDate.getDate() - 365);
+    startDate.setDate(startDate.getDate() - 730);
 
     const endDate = new Date();
 
-    const response = await plaidClient.transactionsGet({
-      access_token: plaidItem.access_token,
-      start_date: startDate.toISOString().split("T")[0],
-      end_date: endDate.toISOString().split("T")[0],
-    });
+    const allTransactions: any[] = [];
+    const pageSize = 500;
+    let offset = 0;
+    let totalAvailable = 0;
+
+    while (true) {
+      const response = await plaidClient.transactionsGet({
+        access_token: plaidItem.access_token,
+        start_date: startDate.toISOString().split("T")[0],
+        end_date: endDate.toISOString().split("T")[0],
+        options: {
+          count: pageSize,
+          offset,
+        },
+      });
+
+      const batch = response.data.transactions;
+      totalAvailable = response.data.total_transactions;
+
+      allTransactions.push(...batch);
+
+      if (allTransactions.length >= totalAvailable || batch.length === 0) {
+        break;
+      }
+
+      offset += pageSize;
+    }
+
+    console.log("PLAID TOTAL RETURNED:", allTransactions.length);
+    console.log("PLAID TOTAL AVAILABLE:", totalAvailable);
+    console.log(
+      "RAW PLAID TRANSACTIONS:",
+      allTransactions.map((tx) => ({
+        name: tx.name,
+        amount: tx.amount,
+        date: tx.date,
+        category: tx.category,
+      }))
+    );
 
     return NextResponse.json({
       success: true,
-      transactions: response.data.transactions,
+      transactions: allTransactions,
+      total_transactions: allTransactions.length,
+      total_available: totalAvailable,
     });
   } catch (error: any) {
     const plaidError = error?.response?.data || error;

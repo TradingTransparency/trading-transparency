@@ -6,6 +6,68 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+function normalizeMerchantName(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function detectPropFirm(name: string) {
+  const normalized = normalizeMerchantName(name);
+
+  if (
+    normalized.includes("apex") ||
+    normalized.includes("apextraderfunding") ||
+    normalized.includes("apextraderfundinginc")
+  ) {
+    return "apex";
+  }
+
+  if (
+    normalized.includes("topstep") ||
+    normalized.includes("topsteptrader")
+  ) {
+    return "topstep";
+  }
+
+  if (normalized.includes("tradeify")) {
+    return "tradeify";
+  }
+
+  if (
+    normalized.includes("lucid") ||
+    normalized.includes("lucidtrading")
+  ) {
+    return "lucid";
+  }
+
+  if (
+    normalized.includes("myfundedfutures") ||
+    normalized.includes("fundedfutures")
+  ) {
+    return "myfundedfutures";
+  }
+
+  if (
+    normalized.includes("takeprofittrader") ||
+    normalized.includes("takeprofittraderllc") ||
+    normalized.includes("takeprofittradpaymentfutureamount") ||
+    normalized.includes("takeprofittrad")
+  ) {
+    return "take profit trader";
+  }
+
+  if (normalized.includes("bulenox")) {
+    return "bulenox";
+  }
+
+  return "";
+}
+
+function detectTransactionType(amount: number): "expense" | "payout" {
+  return amount < 0 ? "payout" : "expense";
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -25,103 +87,63 @@ export async function POST(req: Request) {
       );
     }
 
-    const rows = transactions.map((tx: any) => ({
-      user_id,
-      date: tx.date,
-      merchant: tx.name,
-      amount: tx.amount,
-      category: tx.category?.[0] || "",
-      prop_firm: tx.prop_firm || "",
-      type: tx.type || "",
-    }));
+    const rows = transactions
+      .map((tx: any) => {
+        const merchant = String(tx.name || "");
+        const propFirm = detectPropFirm(merchant);
+        const transactionId = String(tx.transaction_id || "").trim();
 
-    const seen = new Set<string>();
-    const dedupedRows = rows.filter((row) => {
-      const key = [
-        row.user_id,
-        row.date,
-        row.merchant,
-        row.amount,
-        row.prop_firm,
-        row.type,
-      ].join("|");
+        if (!propFirm) return null;
+        if (!transactionId) return null;
 
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+        return {
+          transaction_id: transactionId,
+          user_id,
+          date: tx.date,
+          merchant,
+          amount: Number(tx.amount),
+          category: tx.category?.[0] || "",
+          prop_firm: propFirm,
+          type: detectTransactionType(Number(tx.amount)),
+        };
+      })
+      .filter(Boolean) as Array<{
+      transaction_id: string;
+      user_id: string;
+      date: string;
+      merchant: string;
+      amount: number;
+      category: string;
+      prop_firm: string;
+      type: "expense" | "payout";
+    }>;
 
-    if (dedupedRows.length === 0) {
+    if (rows.length === 0) {
       return NextResponse.json({
         success: true,
         inserted: 0,
-        message: "No transactions to process",
+        message: "No prop firm transactions detected",
       });
     }
 
-    const merchantList = dedupedRows.map((row) => row.merchant);
-    const dateList = dedupedRows.map((row) => row.date);
-    const amountList = dedupedRows.map((row) => row.amount);
-
-    const { data: existingRows, error: existingError } = await supabaseAdmin
-      .from("transactions")
-      .select("id, user_id, date, merchant, amount, prop_firm, type")
-      .eq("user_id", user_id)
-      .in("merchant", merchantList)
-      .in("date", dateList)
-      .in("amount", amountList);
-
-    if (existingError) {
-      console.error("SUPABASE EXISTING ROWS ERROR:", existingError);
-      return NextResponse.json(
-        { error: "Failed checking existing rows", details: existingError },
-        { status: 500 }
-      );
+    const uniqueMap = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      uniqueMap.set(row.transaction_id, row);
     }
-
-    const existingKeys = new Set(
-      (existingRows || []).map((row: any) =>
-        [
-          row.user_id,
-          row.date,
-          row.merchant,
-          row.amount,
-          row.prop_firm || "",
-          row.type || "",
-        ].join("|")
-      )
-    );
-
-    const rowsToInsert = dedupedRows.filter((row) => {
-      const key = [
-        row.user_id,
-        row.date,
-        row.merchant,
-        row.amount,
-        row.prop_firm,
-        row.type,
-      ].join("|");
-
-      return !existingKeys.has(key);
-    });
-
-    if (rowsToInsert.length === 0) {
-      return NextResponse.json({
-        success: true,
-        inserted: 0,
-        message: "No new transactions to insert",
-      });
-    }
+    const dedupedRows = Array.from(uniqueMap.values());
 
     const { data, error } = await supabaseAdmin
       .from("transactions")
-      .insert(rowsToInsert)
+      .upsert(dedupedRows, {
+        onConflict: "transaction_id",
+        ignoreDuplicates: true,
+      })
       .select();
 
     if (error) {
-      console.error("SUPABASE INSERT ERROR:", error);
+      console.error("SUPABASE UPSERT ERROR:", error);
       return NextResponse.json(
-        { error: "Insert failed", details: error },
+        { error: "Upsert failed", details: error },
         { status: 500 }
       );
     }

@@ -12,6 +12,9 @@ export async function POST() {
       products: [Products.Transactions],
       country_codes: [CountryCode.Us],
       language: "en",
+      transactions: {
+        days_requested: 730,
+      },
     });
 
     return NextResponse.json({

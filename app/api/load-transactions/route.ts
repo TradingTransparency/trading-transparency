@@ -17,18 +17,39 @@ export async function POST(req: Request) {
       );
     }
 
-    const { data, error } = await supabaseAdmin
-      .from("transactions")
-      .select("*")
-      .eq("user_id", user_id)
-      .order("date", { ascending: false });
+    const pageSize = 1000;
+    let from = 0;
+    let allRows: any[] = [];
 
-    if (error) {
-      console.error("LOAD TRANSACTIONS ERROR:", error);
-      return NextResponse.json({ error }, { status: 500 });
+    while (true) {
+      const to = from + pageSize - 1;
+
+      const { data, error } = await supabaseAdmin
+        .from("transactions")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("date", { ascending: false })
+        .range(from, to);
+
+      if (error) {
+        console.error("LOAD TRANSACTIONS ERROR:", error);
+        return NextResponse.json({ error }, { status: 500 });
+      }
+
+      if (!data || data.length === 0) {
+        break;
+      }
+
+      allRows = allRows.concat(data);
+
+      if (data.length < pageSize) {
+        break;
+      }
+
+      from += pageSize;
     }
 
-    return NextResponse.json({ transactions: data });
+    return NextResponse.json({ transactions: allRows });
   } catch (err) {
     console.error("LOAD TRANSACTIONS SERVER ERROR:", err);
     return NextResponse.json(
