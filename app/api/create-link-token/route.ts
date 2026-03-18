@@ -1,23 +1,6 @@
 import { NextResponse } from "next/server";
-import {
-  Configuration,
-  PlaidApi,
-  PlaidEnvironments,
-  Products,
-  CountryCode,
-} from "plaid";
-
-const config = new Configuration({
-  basePath: PlaidEnvironments.sandbox,
-  baseOptions: {
-    headers: {
-      "PLAID-CLIENT-ID": process.env.PLAID_CLIENT_ID!,
-      "PLAID-SECRET": process.env.PLAID_SECRET!,
-    },
-  },
-});
-
-const plaidClient = new PlaidApi(config);
+import { CountryCode, Products } from "plaid";
+import { plaidClient } from "@/lib/plaid";
 
 export async function POST() {
   try {
@@ -36,7 +19,6 @@ export async function POST() {
     });
   } catch (error: any) {
     console.error("PLAID ERROR:", error?.response?.data || error);
-
     return NextResponse.json(
       { error: "Failed to create link token" },
       { status: 500 }

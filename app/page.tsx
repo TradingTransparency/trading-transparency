@@ -66,44 +66,58 @@ export default function Home() {
     if (!session) return;
 
     const loadTransactions = async () => {
-      const response = await fetch("/api/load-transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_id: session.user.id,
-        }),
-      });
+      try {
+        const response = await fetch("/api/load-transactions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_id: session.user.id,
+          }),
+        });
 
-      const data = await response.json();
+        const data = await response.json();
 
-      if (data.transactions) {
-        const loadedTransactions: PropTransaction[] = data.transactions.map(
-          (tx: any, index: number) => ({
-            transaction_id:
-              tx.transaction_id ||
-              `loaded-${tx.id || `${tx.date}-${tx.merchant}-${tx.amount}-${index}`}`,
-            name: tx.merchant,
-            amount: Number(tx.amount),
-            date: tx.date,
-            category: tx.category ? [tx.category] : [],
-            prop_firm: tx.prop_firm,
-            type: tx.type,
-          })
-        );
+        if (data.transactions) {
+          const loadedTransactions: PropTransaction[] = data.transactions.map(
+            (tx: any, index: number) => ({
+              transaction_id:
+                tx.transaction_id ||
+                `loaded-${tx.id || `${tx.date}-${tx.merchant}-${tx.amount}-${index}`}`,
+              name: tx.merchant,
+              amount: Number(tx.amount),
+              date: tx.date,
+              category: tx.category ? [tx.category] : [],
+              prop_firm: tx.prop_firm,
+              type: tx.type,
+            })
+          );
 
-        setTransactions(loadedTransactions);
+          setTransactions(loadedTransactions);
+        }
+      } catch (error) {
+        console.error("Failed to load saved transactions:", error);
       }
     };
 
     const fetchLinkToken = async () => {
-      const response = await fetch("/api/create-link-token", {
-        method: "POST",
-      });
+      try {
+        const response = await fetch("/api/create-link-token", {
+          method: "POST",
+        });
 
-      const data = await response.json();
-      setLinkToken(data.link_token);
+        const data = await response.json();
+
+        if (data.link_token) {
+          setLinkToken(data.link_token);
+        } else {
+          setStatus("Failed to create Plaid link token.");
+        }
+      } catch (error) {
+        console.error("Failed to fetch link token:", error);
+        setStatus("Failed to initialize bank connection.");
+      }
     };
 
     loadTransactions();
@@ -189,96 +203,109 @@ export default function Home() {
       return;
     }
 
-    setStatus("Exchanging token...");
+    try {
+      setStatus("Exchanging token...");
 
-    const exchangeResponse = await fetch("/api/exchange-public-token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ public_token }),
-    });
+      const exchangeResponse = await fetch("/api/exchange-public-token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          public_token,
+          user_id: session.user.id,
+        }),
+      });
 
-    const exchangeData = await exchangeResponse.json();
+      const exchangeData = await exchangeResponse.json();
 
-    setStatus("Fetching transactions...");
-
-    const transactionsResponse = await fetch("/api/transactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        access_token: exchangeData.access_token,
-      }),
-    });
-
-    const transactionsData = await transactionsResponse.json();
-
-    const combinedTransactions = [...(transactionsData.transactions || [])];
-    const propTransactions = detectPropTransactions(combinedTransactions);
-
-    setTransactions(propTransactions);
-    setStatus("Saving transactions...");
-
-    const saveResponse = await fetch("/api/save-transactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        user_id: session.user.id,
-        transactions: propTransactions,
-      }),
-    });
-
-    const saveData = await saveResponse.json();
-
-    if (saveData.success) {
-      if (saveData.inserted === 0) {
-        setStatus("No new transactions to save. Existing data loaded.");
-      } else {
-        setStatus(
-          `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
-        );
+      if (!exchangeData.success) {
+        setStatus("Failed to exchange token.");
+        return;
       }
-    } else {
-      setStatus("Failed to save transactions.");
-    }
 
-    const reloadResponse = await fetch("/api/load-transactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        user_id: session.user.id,
-      }),
-    });
+      setStatus("Fetching transactions...");
 
-    const reloadData = await reloadResponse.json();
+      const transactionsResponse = await fetch("/api/transactions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: session.user.id,
+        }),
+      });
 
-    if (reloadData.transactions) {
-      const loadedTransactions: PropTransaction[] = reloadData.transactions.map(
-        (tx: any, index: number) => ({
-          transaction_id:
-            tx.transaction_id ||
-            `loaded-${tx.id || `${tx.date}-${tx.merchant}-${tx.amount}-${index}`}`,
-          name: tx.merchant,
-          amount: Number(tx.amount),
-          date: tx.date,
-          category: tx.category ? [tx.category] : [],
-          prop_firm: tx.prop_firm,
-          type: tx.type,
-        })
-      );
+      const transactionsData = await transactionsResponse.json();
 
-      setTransactions(loadedTransactions);
+      const combinedTransactions = [...(transactionsData.transactions || [])];
+      const propTransactions = detectPropTransactions(combinedTransactions);
+
+      setTransactions(propTransactions);
+      setStatus("Saving transactions...");
+
+      const saveResponse = await fetch("/api/save-transactions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: session.user.id,
+          transactions: propTransactions,
+        }),
+      });
+
+      const saveData = await saveResponse.json();
+
+      if (saveData.success) {
+        if (saveData.inserted === 0) {
+          setStatus("No new transactions to save. Existing data loaded.");
+        } else {
+          setStatus(
+            `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
+          );
+        }
+      } else {
+        setStatus("Failed to save transactions.");
+      }
+
+      const reloadResponse = await fetch("/api/load-transactions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: session.user.id,
+        }),
+      });
+
+      const reloadData = await reloadResponse.json();
+
+      if (reloadData.transactions) {
+        const loadedTransactions: PropTransaction[] = reloadData.transactions.map(
+          (tx: any, index: number) => ({
+            transaction_id:
+              tx.transaction_id ||
+              `loaded-${tx.id || `${tx.date}-${tx.merchant}-${tx.amount}-${index}`}`,
+            name: tx.merchant,
+            amount: Number(tx.amount),
+            date: tx.date,
+            category: tx.category ? [tx.category] : [],
+            prop_firm: tx.prop_firm,
+            type: tx.type,
+          })
+        );
+
+        setTransactions(loadedTransactions);
+      }
+    } catch (error) {
+      console.error("Plaid connection flow failed:", error);
+      setStatus("Something went wrong during bank connection.");
     }
   };
 
   const { open, ready } = usePlaidLink({
-    token: linkToken!,
+    token: linkToken || "",
     onSuccess,
   });
 
@@ -379,7 +406,8 @@ export default function Home() {
       .map((point, index) => {
         const x =
           padding +
-          (index / Math.max(profitCurveData.length - 1, 1)) * (width - padding * 2);
+          (index / Math.max(profitCurveData.length - 1, 1)) *
+            (width - padding * 2);
         const y =
           height -
           padding -
@@ -411,7 +439,8 @@ export default function Home() {
   };
 
   const heroCard: CSSProperties = {
-    background: "linear-gradient(135deg, rgba(17,24,39,0.92), rgba(23,37,84,0.88))",
+    background:
+      "linear-gradient(135deg, rgba(17,24,39,0.92), rgba(23,37,84,0.88))",
     border: "1px solid rgba(255,255,255,0.10)",
     borderRadius: "28px",
     padding: "30px 34px",
@@ -649,8 +678,12 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => open()}
-                disabled={!ready}
-                style={buttonPrimary}
+                disabled={!ready || !linkToken}
+                style={{
+                  ...buttonPrimary,
+                  opacity: !ready || !linkToken ? 0.6 : 1,
+                  cursor: !ready || !linkToken ? "not-allowed" : "pointer",
+                }}
               >
                 Connect Bank Account
               </button>
