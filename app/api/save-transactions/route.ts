@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 export async function POST(req: Request) {
   try {
@@ -51,11 +51,19 @@ export async function POST(req: Request) {
       return true;
     });
 
+    if (dedupedRows.length === 0) {
+      return NextResponse.json({
+        success: true,
+        inserted: 0,
+        message: "No transactions to process",
+      });
+    }
+
     const merchantList = dedupedRows.map((row) => row.merchant);
     const dateList = dedupedRows.map((row) => row.date);
     const amountList = dedupedRows.map((row) => row.amount);
 
-    const { data: existingRows, error: existingError } = await supabase
+    const { data: existingRows, error: existingError } = await supabaseAdmin
       .from("transactions")
       .select("id, user_id, date, merchant, amount, prop_firm, type")
       .eq("user_id", user_id)
@@ -105,7 +113,7 @@ export async function POST(req: Request) {
       });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from("transactions")
       .insert(rowsToInsert)
       .select();

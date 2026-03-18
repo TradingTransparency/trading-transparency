@@ -45,13 +45,26 @@ export async function POST(req: NextRequest) {
     });
 
     return NextResponse.json({
+      success: true,
       transactions: response.data.transactions,
     });
   } catch (error: any) {
-    console.error("PLAID TRANSACTIONS ERROR:", error?.response?.data || error);
+    const plaidError = error?.response?.data || error;
+    console.error("PLAID TRANSACTIONS ERROR:", plaidError);
+
+    if (plaidError?.error_code === "PRODUCT_NOT_READY") {
+      return NextResponse.json(
+        {
+          success: false,
+          product_not_ready: true,
+          error: "Transactions are still syncing. Try again in a few minutes.",
+        },
+        { status: 202 }
+      );
+    }
 
     return NextResponse.json(
-      { error: "Failed to fetch transactions" },
+      { success: false, error: "Failed to fetch transactions" },
       { status: 500 }
     );
   }

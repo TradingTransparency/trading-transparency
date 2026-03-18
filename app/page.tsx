@@ -38,6 +38,8 @@ export default function Home() {
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [status, setStatus] = useState("Not connected");
   const [transactions, setTransactions] = useState<PropTransaction[]>([]);
+  const [hasLinkedBank, setHasLinkedBank] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const [selectedFirm, setSelectedFirm] = useState("all");
   const [selectedType, setSelectedType] = useState("all");
@@ -95,6 +97,10 @@ export default function Home() {
           );
 
           setTransactions(loadedTransactions);
+
+          if (loadedTransactions.length > 0) {
+            setHasLinkedBank(true);
+          }
         }
       } catch (error) {
         console.error("Failed to load saved transactions:", error);
@@ -195,6 +201,95 @@ export default function Home() {
     setLinkToken(null);
     setSelectedFirm("all");
     setSelectedType("all");
+    setHasLinkedBank(false);
+    setIsRetrying(false);
+  };
+
+  const fetchAndSaveTransactions = async (userId: string) => {
+    setStatus("Fetching transactions...");
+
+    const transactionsResponse = await fetch("/api/transactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+      }),
+    });
+
+    const transactionsData = await transactionsResponse.json();
+
+    if (transactionsData.product_not_ready) {
+      setStatus("Your bank is still syncing transactions. Try again in a few minutes.");
+      return;
+    }
+
+    if (!transactionsData.success && !transactionsData.transactions) {
+      setStatus("Failed to fetch transactions.");
+      return;
+    }
+
+    const combinedTransactions = [...(transactionsData.transactions || [])];
+    const propTransactions = detectPropTransactions(combinedTransactions);
+
+    setTransactions(propTransactions);
+    setStatus("Saving transactions...");
+
+    const saveResponse = await fetch("/api/save-transactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        transactions: propTransactions,
+      }),
+    });
+
+    const saveData = await saveResponse.json();
+
+    if (saveData.success) {
+      if (saveData.inserted === 0) {
+        setStatus("No new transactions to save. Existing data loaded.");
+      } else {
+        setStatus(
+          `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
+        );
+      }
+    } else {
+      setStatus("Failed to save transactions.");
+    }
+
+    const reloadResponse = await fetch("/api/load-transactions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+      }),
+    });
+
+    const reloadData = await reloadResponse.json();
+
+    if (reloadData.transactions) {
+      const loadedTransactions: PropTransaction[] = reloadData.transactions.map(
+        (tx: any, index: number) => ({
+          transaction_id:
+            tx.transaction_id ||
+            `loaded-${tx.id || `${tx.date}-${tx.merchant}-${tx.amount}-${index}`}`,
+          name: tx.merchant,
+          amount: Number(tx.amount),
+          date: tx.date,
+          category: tx.category ? [tx.category] : [],
+          prop_firm: tx.prop_firm,
+          type: tx.type,
+        })
+      );
+
+      setTransactions(loadedTransactions);
+    }
   };
 
   const onSuccess = async (public_token: string) => {
@@ -224,83 +319,28 @@ export default function Home() {
         return;
       }
 
-      setStatus("Fetching transactions...");
-
-      const transactionsResponse = await fetch("/api/transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_id: session.user.id,
-        }),
-      });
-
-      const transactionsData = await transactionsResponse.json();
-
-      const combinedTransactions = [...(transactionsData.transactions || [])];
-      const propTransactions = detectPropTransactions(combinedTransactions);
-
-      setTransactions(propTransactions);
-      setStatus("Saving transactions...");
-
-      const saveResponse = await fetch("/api/save-transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_id: session.user.id,
-          transactions: propTransactions,
-        }),
-      });
-
-      const saveData = await saveResponse.json();
-
-      if (saveData.success) {
-        if (saveData.inserted === 0) {
-          setStatus("No new transactions to save. Existing data loaded.");
-        } else {
-          setStatus(
-            `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
-          );
-        }
-      } else {
-        setStatus("Failed to save transactions.");
-      }
-
-      const reloadResponse = await fetch("/api/load-transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_id: session.user.id,
-        }),
-      });
-
-      const reloadData = await reloadResponse.json();
-
-      if (reloadData.transactions) {
-        const loadedTransactions: PropTransaction[] = reloadData.transactions.map(
-          (tx: any, index: number) => ({
-            transaction_id:
-              tx.transaction_id ||
-              `loaded-${tx.id || `${tx.date}-${tx.merchant}-${tx.amount}-${index}`}`,
-            name: tx.merchant,
-            amount: Number(tx.amount),
-            date: tx.date,
-            category: tx.category ? [tx.category] : [],
-            prop_firm: tx.prop_firm,
-            type: tx.type,
-          })
-        );
-
-        setTransactions(loadedTransactions);
-      }
+      setHasLinkedBank(true);
+      await fetchAndSaveTransactions(session.user.id);
     } catch (error) {
       console.error("Plaid connection flow failed:", error);
       setStatus("Something went wrong during bank connection.");
+    }
+  };
+
+  const handleRetryTransactions = async () => {
+    if (!session?.user?.id) {
+      setStatus("User not logged in.");
+      return;
+    }
+
+    try {
+      setIsRetrying(true);
+      await fetchAndSaveTransactions(session.user.id);
+    } catch (error) {
+      console.error("Retry transactions failed:", error);
+      setStatus("Something went wrong while retrying transactions.");
+    } finally {
+      setIsRetrying(false);
     }
   };
 
@@ -687,6 +727,23 @@ export default function Home() {
               >
                 Connect Bank Account
               </button>
+
+              {hasLinkedBank && (
+                <button
+                  type="button"
+                  onClick={handleRetryTransactions}
+                  disabled={isRetrying}
+                  style={{
+                    ...buttonPrimary,
+                    background: "#dbeafe",
+                    color: "#111827",
+                    opacity: isRetrying ? 0.6 : 1,
+                    cursor: isRetrying ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {isRetrying ? "Retrying..." : "Retry Transactions"}
+                </button>
+              )}
 
               <button
                 type="button"
