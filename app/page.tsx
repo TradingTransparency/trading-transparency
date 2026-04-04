@@ -24,7 +24,7 @@ type DateFilter =
   | "lastYear"
   | "custom";
 
-const SAVE_BATCH_SIZE = 50;
+const SAVE_BATCH_SIZE = 25;
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
@@ -247,7 +247,22 @@ export default function Home() {
       }),
     });
 
-    const reloadData = await reloadResponse.json();
+    const reloadText = await reloadResponse.text();
+
+    let reloadData: any;
+    try {
+      reloadData = reloadText ? JSON.parse(reloadText) : {};
+    } catch (error) {
+      console.error("Failed to parse reload response:", reloadText);
+      setStatus("Failed to parse saved transactions response.");
+      return;
+    }
+
+    if (!reloadResponse.ok) {
+      console.error("/api/load-transactions failed:", reloadData);
+      setStatus(`Failed to reload saved transactions (${reloadResponse.status}).`);
+      return;
+    }
 
     if (reloadData.transactions) {
       const loadedTransactions: PropTransaction[] = reloadData.transactions.map(
@@ -282,7 +297,25 @@ export default function Home() {
       }),
     });
 
-    const transactionsData = await transactionsResponse.json();
+    const transactionsText = await transactionsResponse.text();
+
+    let transactionsData: any;
+    try {
+      transactionsData = transactionsText ? JSON.parse(transactionsText) : {};
+    } catch (error) {
+      console.error(
+        "Failed to parse /api/transactions response:",
+        transactionsText
+      );
+      setStatus("Failed to parse transactions response.");
+      return;
+    }
+
+    if (!transactionsResponse.ok) {
+      console.error("/api/transactions failed:", transactionsData);
+      setStatus(`Transaction fetch failed (${transactionsResponse.status}).`);
+      return;
+    }
 
     if (transactionsData.product_not_ready) {
       setStatus(
@@ -291,14 +324,16 @@ export default function Home() {
       return;
     }
 
-    if (!transactionsData.success || !transactionsData.transactions) {
+    if (
+      !transactionsData.success ||
+      !Array.isArray(transactionsData.transactions)
+    ) {
+      console.error("Invalid transactions payload:", transactionsData);
       setStatus("Failed to fetch transactions.");
       return;
     }
 
-    const allFetchedTransactions = Array.isArray(transactionsData.transactions)
-      ? transactionsData.transactions
-      : [];
+    const allFetchedTransactions = transactionsData.transactions;
 
     if (allFetchedTransactions.length === 0) {
       setStatus("No transactions returned from Plaid.");
@@ -306,8 +341,10 @@ export default function Home() {
       return;
     }
 
+    // IMPORTANT: include account_id here
     const minimalTransactions = allFetchedTransactions.map((tx: any) => ({
       transaction_id: tx.transaction_id,
+      account_id: tx.account_id,
       name: tx.name,
       merchant_name: tx.merchant_name,
       amount: tx.amount,
@@ -337,10 +374,25 @@ export default function Home() {
         }),
       });
 
-      const saveData = await saveResponse.json();
+      const saveText = await saveResponse.text();
+
+      let saveData: any;
+      try {
+        saveData = saveText ? JSON.parse(saveText) : {};
+      } catch (error) {
+        console.error(
+          `Failed to parse /api/save-transactions batch ${i + 1}:`,
+          saveText
+        );
+        setStatus(`Save response parse failed on batch ${i + 1}.`);
+        return;
+      }
 
       if (!saveResponse.ok || !saveData.success) {
-        console.error("Save batch failed:", saveData);
+        console.error(`Save batch ${i + 1} failed:`, {
+          status: saveResponse.status,
+          body: saveData,
+        });
         setStatus(`Failed while saving batch ${i + 1} of ${batches.length}.`);
         return;
       }
@@ -382,18 +434,31 @@ export default function Home() {
         }),
       });
 
-      const exchangeData = await exchangeResponse.json();
+      const exchangeText = await exchangeResponse.text();
 
-      if (!exchangeData.success) {
+      let exchangeData: any;
+      try {
+        exchangeData = exchangeText ? JSON.parse(exchangeText) : {};
+      } catch (error) {
+        console.error(
+          "Failed to parse /api/exchange-public-token response:",
+          exchangeText
+        );
+        setStatus("Failed to parse token exchange response.");
+        return;
+      }
+
+      if (!exchangeResponse.ok || !exchangeData.success) {
+        console.error("Exchange token failed:", exchangeData);
         setStatus("Failed to exchange token.");
         return;
       }
 
       setHasLinkedBank(true);
       await fetchAndSaveTransactions(session.user.id);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Plaid connection flow failed:", error);
-      setStatus("Something went wrong during bank connection.");
+      setStatus(error?.message || "Something went wrong during bank connection.");
     }
   };
 
@@ -406,9 +471,11 @@ export default function Home() {
     try {
       setIsRetrying(true);
       await fetchAndSaveTransactions(session.user.id);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Retry transactions failed:", error);
-      setStatus("Something went wrong while retrying transactions.");
+      setStatus(
+        error?.message || "Something went wrong while retrying transactions."
+      );
     } finally {
       setIsRetrying(false);
     }
@@ -460,7 +527,9 @@ export default function Home() {
         const start = customStartDate
           ? new Date(`${customStartDate}T00:00:00`)
           : null;
-        const end = customEndDate ? new Date(`${customEndDate}T23:59:59`) : null;
+        const end = customEndDate
+          ? new Date(`${customEndDate}T23:59:59`)
+          : null;
 
         if (start && txDate < start) return false;
         if (end && txDate > end) return false;
