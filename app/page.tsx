@@ -24,6 +24,8 @@ type DateFilter =
   | "lastYear"
   | "custom";
 
+const SAVE_BATCH_SIZE = 150;
+
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -56,6 +58,16 @@ function getUsername(session: Session | null) {
   }
 
   return "Trader";
+}
+
+function chunkArray<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+
+  return chunks;
 }
 
 export default function Home() {
@@ -132,7 +144,7 @@ export default function Home() {
           );
 
           setTransactions(loadedTransactions);
-          setHasLinkedBank(true);
+          setHasLinkedBank(loadedTransactions.length > 0);
         }
       } catch (error) {
         console.error("Failed to load saved transactions:", error);
@@ -253,6 +265,7 @@ export default function Home() {
       );
 
       setTransactions(loadedTransactions);
+      setHasLinkedBank(loadedTransactions.length > 0);
     }
   };
 
@@ -272,7 +285,9 @@ export default function Home() {
     const transactionsData = await transactionsResponse.json();
 
     if (transactionsData.product_not_ready) {
-      setStatus("Your bank is still syncing transactions. Try again in a few minutes.");
+      setStatus(
+        "Your bank is still syncing transactions. Try again in a few minutes."
+      );
       return;
     }
 
@@ -281,32 +296,61 @@ export default function Home() {
       return;
     }
 
-    setStatus("Saving transactions...");
+    const allFetchedTransactions = Array.isArray(transactionsData.transactions)
+      ? transactionsData.transactions
+      : [];
 
-    const saveResponse = await fetch("/api/save-transactions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        user_id: userId,
-        transactions: transactionsData.transactions,
-      }),
-    });
-
-    const saveData = await saveResponse.json();
-
-    if (saveData.success) {
-      if (saveData.inserted === 0) {
-        setStatus("No new transactions to save. Existing data loaded.");
-      } else {
-        setStatus(
-          `Transactions saved successfully. Inserted ${saveData.inserted} new rows.`
-        );
-      }
-    } else {
-      setStatus("Failed to save transactions.");
+    if (allFetchedTransactions.length === 0) {
+      setStatus("No transactions returned from Plaid.");
+      await reloadSavedTransactions(userId);
       return;
+    }
+
+    const batches = chunkArray(allFetchedTransactions, SAVE_BATCH_SIZE);
+
+    let totalInserted = 0;
+    let totalMatched = 0;
+
+    for (let i = 0; i < batches.length; i += 1) {
+      const batch = batches[i];
+
+      setStatus(
+        `Saving transactions... batch ${i + 1} of ${batches.length}`
+      );
+
+      const saveResponse = await fetch("/api/save-transactions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          transactions: batch,
+        }),
+      });
+
+      const saveData = await saveResponse.json();
+
+      if (!saveResponse.ok || !saveData.success) {
+        console.error("Save batch failed:", saveData);
+        setStatus(
+          `Failed while saving batch ${i + 1} of ${batches.length}.`
+        );
+        return;
+      }
+
+      totalInserted += Number(saveData.inserted || 0);
+      totalMatched += Number(saveData.matched || 0);
+    }
+
+    if (totalMatched === 0) {
+      setStatus("No prop firm transactions detected.");
+    } else if (totalInserted === 0) {
+      setStatus("No new transactions to save. Existing data loaded.");
+    } else {
+      setStatus(
+        `Transactions saved successfully. Inserted ${totalInserted} new rows.`
+      );
     }
 
     await reloadSavedTransactions(userId);
@@ -410,7 +454,9 @@ export default function Home() {
         const start = customStartDate
           ? new Date(`${customStartDate}T00:00:00`)
           : null;
-        const end = customEndDate ? new Date(`${customEndDate}T23:59:59`) : null;
+        const end = customEndDate
+          ? new Date(`${customEndDate}T23:59:59`)
+          : null;
 
         if (start && txDate < start) return false;
         if (end && txDate > end) return false;
@@ -825,8 +871,12 @@ export default function Home() {
                 }}
               >
                 <div style={labelChip}>User: {username}</div>
-                <div style={labelChip}>Range: {selectedDateFilter === "custom" ? "Custom" : selectedDateFilter}</div>
-                <div style={labelChip}>{dateFilteredTransactions.length} classified transactions</div>
+                <div style={labelChip}>
+                  Range: {selectedDateFilter === "custom" ? "Custom" : selectedDateFilter}
+                </div>
+                <div style={labelChip}>
+                  {dateFilteredTransactions.length} classified transactions
+                </div>
               </div>
             </div>
 
@@ -903,7 +953,14 @@ export default function Home() {
             }}
           >
             <div>
-              <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+              <div
+                style={{
+                  fontSize: "13px",
+                  color: "#64748b",
+                  marginBottom: "8px",
+                  fontWeight: 700,
+                }}
+              >
                 Date Range
               </div>
               <select
@@ -926,7 +983,14 @@ export default function Home() {
             {selectedDateFilter === "custom" && (
               <>
                 <div>
-                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                  <div
+                    style={{
+                      fontSize: "13px",
+                      color: "#64748b",
+                      marginBottom: "8px",
+                      fontWeight: 700,
+                    }}
+                  >
                     Start Date
                   </div>
                   <input
@@ -938,7 +1002,14 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+                  <div
+                    style={{
+                      fontSize: "13px",
+                      color: "#64748b",
+                      marginBottom: "8px",
+                      fontWeight: 700,
+                    }}
+                  >
                     End Date
                   </div>
                   <input
@@ -952,7 +1023,14 @@ export default function Home() {
             )}
 
             <div>
-              <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+              <div
+                style={{
+                  fontSize: "13px",
+                  color: "#64748b",
+                  marginBottom: "8px",
+                  fontWeight: 700,
+                }}
+              >
                 Firm Filter
               </div>
               <select
@@ -970,7 +1048,14 @@ export default function Home() {
             </div>
 
             <div>
-              <div style={{ fontSize: "13px", color: "#64748b", marginBottom: "8px", fontWeight: 700 }}>
+              <div
+                style={{
+                  fontSize: "13px",
+                  color: "#64748b",
+                  marginBottom: "8px",
+                  fontWeight: 700,
+                }}
+              >
                 Transaction Type
               </div>
               <select
@@ -1006,25 +1091,60 @@ export default function Home() {
           }}
         >
           <div style={metricCard("#dbeafe")}>
-            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+            <div
+              style={{
+                color: "#64748b",
+                fontSize: "14px",
+                marginBottom: "12px",
+                fontWeight: 700,
+              }}
+            >
               Total Spend
             </div>
-            <div style={{ fontSize: "44px", fontWeight: 900, lineHeight: 1, letterSpacing: "-0.03em" }}>
+            <div
+              style={{
+                fontSize: "44px",
+                fontWeight: 900,
+                lineHeight: 1,
+                letterSpacing: "-0.03em",
+              }}
+            >
               {formatCurrency(totalExpenses)}
             </div>
           </div>
 
           <div style={metricCard("#dcfce7")}>
-            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+            <div
+              style={{
+                color: "#64748b",
+                fontSize: "14px",
+                marginBottom: "12px",
+                fontWeight: 700,
+              }}
+            >
               Total Payouts
             </div>
-            <div style={{ fontSize: "44px", fontWeight: 900, lineHeight: 1, letterSpacing: "-0.03em" }}>
+            <div
+              style={{
+                fontSize: "44px",
+                fontWeight: 900,
+                lineHeight: 1,
+                letterSpacing: "-0.03em",
+              }}
+            >
               {formatCurrency(totalPayouts)}
             </div>
           </div>
 
           <div style={metricCard(netProfit >= 0 ? "#dcfce7" : "#fee2e2")}>
-            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+            <div
+              style={{
+                color: "#64748b",
+                fontSize: "14px",
+                marginBottom: "12px",
+                fontWeight: 700,
+              }}
+            >
               Net Profit
             </div>
             <div
@@ -1041,10 +1161,24 @@ export default function Home() {
           </div>
 
           <div style={metricCard("#ede9fe")}>
-            <div style={{ color: "#64748b", fontSize: "14px", marginBottom: "12px", fontWeight: 700 }}>
+            <div
+              style={{
+                color: "#64748b",
+                fontSize: "14px",
+                marginBottom: "12px",
+                fontWeight: 700,
+              }}
+            >
               ROI
             </div>
-            <div style={{ fontSize: "44px", fontWeight: 900, lineHeight: 1, letterSpacing: "-0.03em" }}>
+            <div
+              style={{
+                fontSize: "44px",
+                fontWeight: 900,
+                lineHeight: 1,
+                letterSpacing: "-0.03em",
+              }}
+            >
               {formatPercent(roi)}
             </div>
           </div>
@@ -1070,7 +1204,9 @@ export default function Home() {
               }}
             >
               <div>
-                <h2 style={{ margin: 0, fontSize: "22px" }}>Prop Firm Breakdown</h2>
+                <h2 style={{ margin: 0, fontSize: "22px" }}>
+                  Prop Firm Breakdown
+                </h2>
                 <p style={{ margin: "8px 0 0", color: "#64748b" }}>
                   Categorized spend and payout totals by firm.
                 </p>
@@ -1094,7 +1230,8 @@ export default function Home() {
                       border: "1px solid #e2e8f0",
                       borderRadius: "22px",
                       padding: "20px",
-                      background: "linear-gradient(180deg, #ffffff 0%, #f8fbff 100%)",
+                      background:
+                        "linear-gradient(180deg, #ffffff 0%, #f8fbff 100%)",
                     }}
                   >
                     <div
@@ -1109,11 +1246,23 @@ export default function Home() {
                       {firm.firm}
                     </div>
 
-                    <div style={{ color: "#475569", marginBottom: "8px", fontSize: "15px" }}>
+                    <div
+                      style={{
+                        color: "#475569",
+                        marginBottom: "8px",
+                        fontSize: "15px",
+                      }}
+                    >
                       Spend: {formatCurrency(firm.spend)}
                     </div>
 
-                    <div style={{ color: "#475569", marginBottom: "8px", fontSize: "15px" }}>
+                    <div
+                      style={{
+                        color: "#475569",
+                        marginBottom: "8px",
+                        fontSize: "15px",
+                      }}
+                    >
                       Payouts: {formatCurrency(firm.payouts)}
                     </div>
 
@@ -1128,7 +1277,13 @@ export default function Home() {
                       Net: {formatCurrency(firm.net)}
                     </div>
 
-                    <div style={{ color: "#64748b", fontSize: "13px", fontWeight: 700 }}>
+                    <div
+                      style={{
+                        color: "#64748b",
+                        fontSize: "13px",
+                        fontWeight: 700,
+                      }}
+                    >
                       {firm.count} classified transactions
                     </div>
                   </div>
@@ -1151,7 +1306,14 @@ export default function Home() {
                 marginBottom: "16px",
               }}
             >
-              <div style={{ fontSize: "13px", color: "#bfdbfe", marginBottom: "10px", fontWeight: 700 }}>
+              <div
+                style={{
+                  fontSize: "13px",
+                  color: "#bfdbfe",
+                  marginBottom: "10px",
+                  fontWeight: 700,
+                }}
+              >
                 Performance status
               </div>
 
@@ -1186,7 +1348,13 @@ export default function Home() {
                 background: "#ffffff",
               }}
             >
-              <div style={{ fontWeight: 800, marginBottom: "8px", fontSize: "16px" }}>
+              <div
+                style={{
+                  fontWeight: 800,
+                  marginBottom: "8px",
+                  fontSize: "16px",
+                }}
+              >
                 Latest curve value
               </div>
 
