@@ -24,7 +24,7 @@ type DateFilter =
   | "lastYear"
   | "custom";
 
-const SAVE_BATCH_SIZE = 150;
+const SAVE_BATCH_SIZE = 25;
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
@@ -306,7 +306,17 @@ export default function Home() {
       return;
     }
 
-    const batches = chunkArray(allFetchedTransactions, SAVE_BATCH_SIZE);
+    const minimalTransactions = allFetchedTransactions.map((tx: any) => ({
+      transaction_id: tx.transaction_id,
+      name: tx.name,
+      merchant_name: tx.merchant_name,
+      amount: tx.amount,
+      date: tx.date,
+      category: Array.isArray(tx.category) ? tx.category : [],
+      pending: Boolean(tx.pending),
+    }));
+
+    const batches = chunkArray(minimalTransactions, SAVE_BATCH_SIZE);
 
     let totalInserted = 0;
     let totalMatched = 0;
@@ -314,9 +324,7 @@ export default function Home() {
     for (let i = 0; i < batches.length; i += 1) {
       const batch = batches[i];
 
-      setStatus(
-        `Saving transactions... batch ${i + 1} of ${batches.length}`
-      );
+      setStatus(`Saving transactions... batch ${i + 1} of ${batches.length}`);
 
       const saveResponse = await fetch("/api/save-transactions", {
         method: "POST",
@@ -333,9 +341,7 @@ export default function Home() {
 
       if (!saveResponse.ok || !saveData.success) {
         console.error("Save batch failed:", saveData);
-        setStatus(
-          `Failed while saving batch ${i + 1} of ${batches.length}.`
-        );
+        setStatus(`Failed while saving batch ${i + 1} of ${batches.length}.`);
         return;
       }
 
@@ -454,9 +460,7 @@ export default function Home() {
         const start = customStartDate
           ? new Date(`${customStartDate}T00:00:00`)
           : null;
-        const end = customEndDate
-          ? new Date(`${customEndDate}T23:59:59`)
-          : null;
+        const end = customEndDate ? new Date(`${customEndDate}T23:59:59`) : null;
 
         if (start && txDate < start) return false;
         if (end && txDate > end) return false;
