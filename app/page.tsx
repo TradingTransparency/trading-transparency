@@ -24,7 +24,7 @@ type DateFilter =
   | "lastYear"
   | "custom";
 
-const SAVE_BATCH_SIZE = 25;
+const SAVE_BATCH_SIZE = 50;
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
