@@ -40,13 +40,17 @@ function normalizeMerchantName(name: string) {
 function detectPropFirm(name: string) {
   const normalized = normalizeMerchantName(name);
 
+  // Explicit exclusions first
+  if (
+    normalized.includes("apextrainingtools") ||
+    normalized.includes("trainingtools")
+  ) {
+    return "";
+  }
+
   if (
     normalized.includes("apextraderfunding") ||
-    normalized.includes("apextraderfundinginc") ||
-    normalized === "apextraderfunding" ||
-    normalized === "apextraderfundinginc" ||
-    normalized === "apextraderfundingllc" ||
-    normalized === "apextraderfundingpayment"
+    normalized.includes("apextraderfundinginc")
   ) {
     return "apex";
   }
@@ -54,39 +58,39 @@ function detectPropFirm(name: string) {
   if (
     normalized.includes("topsteptrader") ||
     normalized === "topstep" ||
-    normalized === "topsteptraderllc"
+    normalized.includes("topstep")
   ) {
     return "topstep";
   }
 
-  if (normalized === "tradeify") {
+  if (normalized.includes("tradeify")) {
     return "tradeify";
   }
 
   if (
-    normalized === "lucidtrading" ||
-    normalized === "lucidtradingllc"
+    normalized.includes("lucidtrading") ||
+    normalized === "lucidtrading"
   ) {
     return "lucid";
   }
 
   if (
-    normalized === "myfundedfutures" ||
-    normalized === "fundedfutures"
+    normalized.includes("myfundedfutures") ||
+    normalized.includes("fundedfutures")
   ) {
     return "myfundedfutures";
   }
 
   if (
-    normalized === "takeprofittrader" ||
-    normalized === "takeprofittraderllc" ||
-    normalized === "takeprofittradpaymentfutureamount" ||
-    normalized === "takeprofittrad"
+    normalized.includes("takeprofittrader") ||
+    normalized.includes("takeprofittraderllc") ||
+    normalized.includes("takeprofittradpaymentfutureamount") ||
+    normalized.includes("takeprofittrad")
   ) {
     return "take profit trader";
   }
 
-  if (normalized === "bulenox") {
+  if (normalized.includes("bulenox")) {
     return "bulenox";
   }
 
