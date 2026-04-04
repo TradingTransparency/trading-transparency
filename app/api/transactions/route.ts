@@ -2,10 +2,24 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { plaidClient } from "@/lib/plaid";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseServiceRoleKey) {
+  throw new Error("Missing Supabase environment variables.");
+}
+
+const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+type MinimalTransaction = {
+  transaction_id: string;
+  name: string;
+  merchant_name: string;
+  amount: number;
+  date: string;
+  category: string[];
+  pending: boolean;
+};
 
 export async function POST(req: NextRequest) {
   try {
@@ -38,8 +52,8 @@ export async function POST(req: NextRequest) {
 
     const endDate = new Date();
 
-    const allTransactions: any[] = [];
-    const pageSize = 500;
+    const allTransactions: MinimalTransaction[] = [];
+    const pageSize = 200;
     let offset = 0;
     let totalAvailable = 0;
 
@@ -57,7 +71,17 @@ export async function POST(req: NextRequest) {
       const batch = response.data.transactions;
       totalAvailable = response.data.total_transactions;
 
-      allTransactions.push(...batch);
+      const minimalBatch: MinimalTransaction[] = batch.map((tx) => ({
+        transaction_id: String(tx.transaction_id || ""),
+        name: String(tx.name || ""),
+        merchant_name: String(tx.merchant_name || tx.name || ""),
+        amount: Number(tx.amount),
+        date: String(tx.date || ""),
+        category: Array.isArray(tx.category) ? tx.category.map(String) : [],
+        pending: Boolean(tx.pending),
+      }));
+
+      allTransactions.push(...minimalBatch);
 
       if (allTransactions.length >= totalAvailable || batch.length === 0) {
         break;
@@ -68,15 +92,6 @@ export async function POST(req: NextRequest) {
 
     console.log("PLAID TOTAL RETURNED:", allTransactions.length);
     console.log("PLAID TOTAL AVAILABLE:", totalAvailable);
-    console.log(
-      "RAW PLAID TRANSACTIONS:",
-      allTransactions.map((tx) => ({
-        name: tx.name,
-        amount: tx.amount,
-        date: tx.date,
-        category: tx.category,
-      }))
-    );
 
     return NextResponse.json({
       success: true,
