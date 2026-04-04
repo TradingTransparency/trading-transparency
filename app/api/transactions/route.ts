@@ -13,6 +13,7 @@ const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
 type MinimalTransaction = {
   transaction_id: string;
+  account_id: string;
   name: string;
   merchant_name: string;
   amount: number;
@@ -73,6 +74,7 @@ export async function POST(req: NextRequest) {
 
       const minimalBatch: MinimalTransaction[] = batch.map((tx) => ({
         transaction_id: String(tx.transaction_id || ""),
+        account_id: String(tx.account_id || ""),
         name: String(tx.name || ""),
         merchant_name: String(tx.merchant_name || tx.name || ""),
         amount: Number(tx.amount),

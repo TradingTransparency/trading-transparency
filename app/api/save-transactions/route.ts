@@ -12,6 +12,7 @@ const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
 type PlaidTransaction = {
   transaction_id?: string;
+  account_id?: string;
   name?: string;
   merchant_name?: string;
   date?: string;
@@ -22,6 +23,7 @@ type PlaidTransaction = {
 
 type SavedTransactionRow = {
   transaction_id: string;
+  account_id: string;
   user_id: string;
   date: string;
   merchant: string;
@@ -39,48 +41,52 @@ function detectPropFirm(name: string) {
   const normalized = normalizeMerchantName(name);
 
   if (
-    normalized.includes("apex") ||
     normalized.includes("apextraderfunding") ||
-    normalized.includes("apextraderfundinginc")
+    normalized.includes("apextraderfundinginc") ||
+    normalized === "apextraderfunding" ||
+    normalized === "apextraderfundinginc" ||
+    normalized === "apextraderfundingllc" ||
+    normalized === "apextraderfundingpayment"
   ) {
     return "apex";
   }
 
   if (
-    normalized.includes("topstep") ||
-    normalized.includes("topsteptrader")
+    normalized.includes("topsteptrader") ||
+    normalized === "topstep" ||
+    normalized === "topsteptraderllc"
   ) {
     return "topstep";
   }
 
-  if (normalized.includes("tradeify")) {
+  if (normalized === "tradeify") {
     return "tradeify";
   }
 
   if (
-    normalized.includes("lucid") ||
-    normalized.includes("lucidtrading")
+    normalized === "lucidtrading" ||
+    normalized === "lucidtradingllc"
   ) {
     return "lucid";
   }
 
   if (
-    normalized.includes("myfundedfutures") ||
-    normalized.includes("fundedfutures")
+    normalized === "myfundedfutures" ||
+    normalized === "fundedfutures"
   ) {
     return "myfundedfutures";
   }
 
   if (
-    normalized.includes("takeprofittrader") ||
-    normalized.includes("takeprofittraderllc") ||
-    normalized.includes("takeprofittradpaymentfutureamount") ||
-    normalized.includes("takeprofittrad")
+    normalized === "takeprofittrader" ||
+    normalized === "takeprofittraderllc" ||
+    normalized === "takeprofittradpaymentfutureamount" ||
+    normalized === "takeprofittrad"
   ) {
     return "take profit trader";
   }
 
-  if (normalized.includes("bulenox")) {
+  if (normalized === "bulenox") {
     return "bulenox";
   }
 
@@ -91,8 +97,9 @@ function detectTransactionType(amount: number): "expense" | "payout" {
   return amount < 0 ? "payout" : "expense";
 }
 
-function buildPayoutDedupKey(row: {
+function buildDedupKey(row: {
   user_id: string;
+  account_id: string;
   date: string;
   merchant: string;
   amount: number;
@@ -100,6 +107,7 @@ function buildPayoutDedupKey(row: {
 }) {
   return [
     row.user_id.trim(),
+    row.account_id.trim(),
     row.date.trim(),
     normalizeMerchantName(row.merchant),
     row.amount.toFixed(2),
@@ -132,6 +140,7 @@ export async function POST(req: Request) {
     const mappedRows: SavedTransactionRow[] = transactions
       .map((tx) => {
         const transactionId = String(tx.transaction_id || "").trim();
+        const accountId = String(tx.account_id || "").trim();
         const merchant = String(tx.merchant_name || tx.name || "").trim();
         const amount = Number(tx.amount);
         const date = String(tx.date || "").trim();
@@ -140,11 +149,10 @@ export async function POST(req: Request) {
           : "";
 
         if (!transactionId) return null;
+        if (!accountId) return null;
         if (!merchant) return null;
         if (!date) return null;
         if (!Number.isFinite(amount)) return null;
-
-        // Skip pending transactions so we only count finalized rows
         if (tx.pending) return null;
 
         const propFirm = detectPropFirm(merchant);
@@ -152,6 +160,7 @@ export async function POST(req: Request) {
 
         return {
           transaction_id: transactionId,
+          account_id: accountId,
           user_id,
           date,
           merchant,
@@ -173,70 +182,61 @@ export async function POST(req: Request) {
       });
     }
 
-    // First dedupe the current request by transaction_id only
     const requestUniqueByTransactionId = new Map<string, SavedTransactionRow>();
     for (const row of mappedRows) {
       requestUniqueByTransactionId.set(row.transaction_id, row);
     }
     const requestDedupedRows = Array.from(requestUniqueByTransactionId.values());
 
-    // Only load existing payouts for content-based dedupe
-    const { data: existingPayouts, error: existingError } = await supabaseAdmin
+    const { data: existingRows, error: existingError } = await supabaseAdmin
       .from("transactions")
-      .select("user_id, date, merchant, amount, type")
-      .eq("user_id", user_id)
-      .eq("type", "payout");
+      .select("user_id, account_id, date, merchant, amount, type")
+      .eq("user_id", user_id);
 
     if (existingError) {
-      console.error("SUPABASE EXISTING PAYOUTS ERROR:", existingError);
+      console.error("SUPABASE EXISTING ROWS ERROR:", existingError);
       return NextResponse.json(
         {
-          error: "Failed to load existing payouts",
+          error: "Failed to load existing transactions",
           details: existingError.message,
         },
         { status: 500 }
       );
     }
 
-    const existingPayoutKeys = new Set<string>();
-    for (const row of existingPayouts || []) {
+    const existingKeys = new Set<string>();
+    for (const row of existingRows || []) {
       const amount = Number(row.amount);
       if (!Number.isFinite(amount)) continue;
-      if (row.type !== "payout") continue;
+      if (row.type !== "expense" && row.type !== "payout") continue;
 
-      existingPayoutKeys.add(
-        buildPayoutDedupKey({
+      existingKeys.add(
+        buildDedupKey({
           user_id: String(row.user_id || ""),
+          account_id: String(row.account_id || ""),
           date: String(row.date || ""),
           merchant: String(row.merchant || ""),
           amount,
-          type: "payout",
+          type: row.type,
         })
       );
     }
 
     const rowsToInsert: SavedTransactionRow[] = [];
-    const seenPayoutsInThisBatch = new Set<string>();
+    const seenBatchKeys = new Set<string>();
 
     for (const row of requestDedupedRows) {
-      if (row.type === "expense") {
-        // Expenses are allowed to repeat legitimately.
-        // Only transaction_id dedupe applies to them.
-        rowsToInsert.push(row);
+      const dedupKey = buildDedupKey(row);
+
+      if (existingKeys.has(dedupKey)) {
         continue;
       }
 
-      const payoutKey = buildPayoutDedupKey(row);
-
-      if (existingPayoutKeys.has(payoutKey)) {
+      if (seenBatchKeys.has(dedupKey)) {
         continue;
       }
 
-      if (seenPayoutsInThisBatch.has(payoutKey)) {
-        continue;
-      }
-
-      seenPayoutsInThisBatch.add(payoutKey);
+      seenBatchKeys.add(dedupKey);
       rowsToInsert.push(row);
     }
 
