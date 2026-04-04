@@ -1,15 +1,38 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseServiceRoleKey) {
+  throw new Error("Missing Supabase environment variables.");
+}
+
+const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+type PlaidTransaction = {
+  transaction_id?: string;
+  name?: string;
+  merchant_name?: string;
+  date?: string;
+  amount?: number | string;
+  category?: string[];
+  pending?: boolean;
+};
+
+type SavedTransactionRow = {
+  transaction_id: string;
+  user_id: string;
+  date: string;
+  merchant: string;
+  amount: number;
+  category: string;
+  prop_firm: string;
+  type: "expense" | "payout";
+};
 
 function normalizeMerchantName(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function detectPropFirm(name: string) {
@@ -68,10 +91,29 @@ function detectTransactionType(amount: number): "expense" | "payout" {
   return amount < 0 ? "payout" : "expense";
 }
 
+function buildPayoutDedupKey(row: {
+  user_id: string;
+  date: string;
+  merchant: string;
+  amount: number;
+  type: "expense" | "payout";
+}) {
+  return [
+    row.user_id.trim(),
+    row.date.trim(),
+    normalizeMerchantName(row.merchant),
+    row.amount.toFixed(2),
+    row.type,
+  ].join("|");
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { transactions, user_id } = body;
+    const { transactions, user_id } = body as {
+      transactions?: PlaidTransaction[];
+      user_id?: string;
+    };
 
     if (!transactions || !Array.isArray(transactions)) {
       return NextResponse.json(
@@ -80,61 +122,138 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!user_id) {
+    if (!user_id || typeof user_id !== "string") {
       return NextResponse.json(
-        { error: "No user_id received" },
+        { error: "No valid user_id received" },
         { status: 400 }
       );
     }
 
-    const rows = transactions
-      .map((tx: any) => {
-        const merchant = String(tx.name || "");
-        const propFirm = detectPropFirm(merchant);
+    const mappedRows: SavedTransactionRow[] = transactions
+      .map((tx) => {
         const transactionId = String(tx.transaction_id || "").trim();
+        const merchant = String(tx.merchant_name || tx.name || "").trim();
+        const amount = Number(tx.amount);
+        const date = String(tx.date || "").trim();
+        const category = Array.isArray(tx.category)
+          ? String(tx.category[0] || "")
+          : "";
 
-        if (!propFirm) return null;
         if (!transactionId) return null;
+        if (!merchant) return null;
+        if (!date) return null;
+        if (!Number.isFinite(amount)) return null;
+
+        // Skip pending transactions so we only count finalized rows
+        if (tx.pending) return null;
+
+        const propFirm = detectPropFirm(merchant);
+        if (!propFirm) return null;
 
         return {
           transaction_id: transactionId,
           user_id,
-          date: tx.date,
+          date,
           merchant,
-          amount: Number(tx.amount),
-          category: tx.category?.[0] || "",
+          amount,
+          category,
           prop_firm: propFirm,
-          type: detectTransactionType(Number(tx.amount)),
+          type: detectTransactionType(amount),
         };
       })
-      .filter(Boolean) as Array<{
-      transaction_id: string;
-      user_id: string;
-      date: string;
-      merchant: string;
-      amount: number;
-      category: string;
-      prop_firm: string;
-      type: "expense" | "payout";
-    }>;
+      .filter((row): row is SavedTransactionRow => row !== null);
 
-    if (rows.length === 0) {
+    if (mappedRows.length === 0) {
       return NextResponse.json({
         success: true,
+        received: transactions.length,
+        matched: 0,
         inserted: 0,
-        message: "No prop firm transactions detected",
+        message: "No finalized prop firm transactions detected",
       });
     }
 
-    const uniqueMap = new Map<string, (typeof rows)[number]>();
-    for (const row of rows) {
-      uniqueMap.set(row.transaction_id, row);
+    // First dedupe the current request by transaction_id only
+    const requestUniqueByTransactionId = new Map<string, SavedTransactionRow>();
+    for (const row of mappedRows) {
+      requestUniqueByTransactionId.set(row.transaction_id, row);
     }
-    const dedupedRows = Array.from(uniqueMap.values());
+    const requestDedupedRows = Array.from(requestUniqueByTransactionId.values());
+
+    // Only load existing payouts for content-based dedupe
+    const { data: existingPayouts, error: existingError } = await supabaseAdmin
+      .from("transactions")
+      .select("user_id, date, merchant, amount, type")
+      .eq("user_id", user_id)
+      .eq("type", "payout");
+
+    if (existingError) {
+      console.error("SUPABASE EXISTING PAYOUTS ERROR:", existingError);
+      return NextResponse.json(
+        {
+          error: "Failed to load existing payouts",
+          details: existingError.message,
+        },
+        { status: 500 }
+      );
+    }
+
+    const existingPayoutKeys = new Set<string>();
+    for (const row of existingPayouts || []) {
+      const amount = Number(row.amount);
+      if (!Number.isFinite(amount)) continue;
+      if (row.type !== "payout") continue;
+
+      existingPayoutKeys.add(
+        buildPayoutDedupKey({
+          user_id: String(row.user_id || ""),
+          date: String(row.date || ""),
+          merchant: String(row.merchant || ""),
+          amount,
+          type: "payout",
+        })
+      );
+    }
+
+    const rowsToInsert: SavedTransactionRow[] = [];
+    const seenPayoutsInThisBatch = new Set<string>();
+
+    for (const row of requestDedupedRows) {
+      if (row.type === "expense") {
+        // Expenses are allowed to repeat legitimately.
+        // Only transaction_id dedupe applies to them.
+        rowsToInsert.push(row);
+        continue;
+      }
+
+      const payoutKey = buildPayoutDedupKey(row);
+
+      if (existingPayoutKeys.has(payoutKey)) {
+        continue;
+      }
+
+      if (seenPayoutsInThisBatch.has(payoutKey)) {
+        continue;
+      }
+
+      seenPayoutsInThisBatch.add(payoutKey);
+      rowsToInsert.push(row);
+    }
+
+    if (rowsToInsert.length === 0) {
+      return NextResponse.json({
+        success: true,
+        received: transactions.length,
+        matched: mappedRows.length,
+        attempted: 0,
+        inserted: 0,
+        message: "All matched transactions were already saved",
+      });
+    }
 
     const { data, error } = await supabaseAdmin
       .from("transactions")
-      .upsert(dedupedRows, {
+      .upsert(rowsToInsert, {
         onConflict: "transaction_id",
         ignoreDuplicates: true,
       })
@@ -143,20 +262,30 @@ export async function POST(req: Request) {
     if (error) {
       console.error("SUPABASE UPSERT ERROR:", error);
       return NextResponse.json(
-        { error: "Upsert failed", details: error },
+        {
+          error: "Upsert failed",
+          details: error.message,
+        },
         { status: 500 }
       );
     }
 
     return NextResponse.json({
       success: true,
+      received: transactions.length,
+      matched: mappedRows.length,
+      attempted: rowsToInsert.length,
       inserted: data?.length || 0,
       data,
     });
   } catch (err) {
     console.error("SAVE TRANSACTIONS SERVER ERROR:", err);
+
+    const message =
+      err instanceof Error ? err.message : "Unknown server error";
+
     return NextResponse.json(
-      { error: "Server error", details: err },
+      { error: "Server error", details: message },
       { status: 500 }
     );
   }
